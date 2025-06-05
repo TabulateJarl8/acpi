@@ -66,6 +66,7 @@ use alloc::{
     format,
     string::{String, ToString},
 };
+use bit_field::BitField;
 use core::{mem, str::FromStr};
 use log::{error, warn};
 use misc::{ArgNum, LocalNum};
@@ -73,7 +74,7 @@ use name_object::Target;
 use parser::{Parser, Propagate};
 use pkg_length::PkgLength;
 use term_object::term_list;
-use value::{AmlType, Args};
+use value::{AmlType, Args, FieldAccessType, FieldFlags, FieldUpdateRule};
 
 /// AML has a `RevisionOp` operator that returns the "AML interpreter revision". It's not clear
 /// what this is actually used for, but this is ours.
@@ -330,6 +331,88 @@ impl AmlContext {
             Target::Arg(arg) => self.current_arg(*arg),
             Target::Local(local) => self.local(*local),
         }
+    }
+
+    pub(crate) fn read_indexed_field(
+        &mut self,
+        index_register: &mut AmlValue,
+        data_register: &AmlValue,
+        flags: FieldFlags,
+        offset: u64,
+        length: u64,
+    ) -> Result<AmlValue, AmlError> {
+        let min_access_size = match flags.access_type()? {
+            FieldAccessType::Any => 8,
+            FieldAccessType::Byte => 8,
+            FieldAccessType::Word => 16,
+            FieldAccessType::DWord => 32,
+            FieldAccessType::QWord => 64,
+            FieldAccessType::Buffer => 8, // TODO
+        };
+
+        let access_size = u64::max(min_access_size, length.next_power_of_two());
+
+        let mut result = 0u64;
+        for i in 0..access_size {
+            // write the index offset to the index field
+            let byte_offset = offset + i as u64;
+            index_register.write_field(AmlValue::Integer(byte_offset), self)?;
+
+            // read the corresponding bytes from the data field
+            let byte = data_register.read_field(self)?.as_integer(self)?;
+            result |= byte << (i * 8);
+        }
+        Ok(AmlValue::Integer(result))
+    }
+
+    pub(crate) fn write_indexed_field(
+        &mut self,
+        index_register: &mut AmlValue,
+        data_register: &mut AmlValue,
+        flags: FieldFlags,
+        offset: u64,
+        length: u64,
+        value: AmlValue,
+    ) -> Result<(), AmlError> {
+        /*
+         * If the field's update rule is `Preserve`, we need to read the initial value of the field, so we can
+         * overwrite the correct bits. We destructure the field to do the actual write, so we read from it if
+         * needed here, otherwise the borrow-checker doesn't understand.
+         */
+        let mut field_value = match flags.field_update_rule()? {
+            FieldUpdateRule::Preserve => {
+                self.read_indexed_field(index_register, data_register, flags, offset, length)?.as_integer(self)?
+            }
+            FieldUpdateRule::WriteAsOnes => 0xffffffff_ffffffff,
+            FieldUpdateRule::WriteAsZeros => 0x0,
+        };
+
+        let minimum_access_size = match flags.access_type()? {
+            FieldAccessType::Any => 8,
+            FieldAccessType::Byte => 8,
+            FieldAccessType::Word => 16,
+            FieldAccessType::DWord => 32,
+            FieldAccessType::QWord => 64,
+            FieldAccessType::Buffer => 8, // TODO
+        };
+
+        /*
+         * Find the access size, as either the minimum access size allowed by the region, or the field length
+         * rounded up to the next power-of-2, whichever is larger.
+         */
+        let access_size = u64::max(minimum_access_size, length.next_power_of_two());
+
+        field_value.set_bits(0..(length as usize), value.as_integer(self)?);
+
+        for i in 0..access_size {
+            let byte_offset = offset + i as u64;
+            let byte = ((field_value >> (i * 8)) & 0xFF) as u64;
+
+            index_register.write_field(AmlValue::Integer(byte_offset), self)?;
+            data_register.write_field(AmlValue::Integer(byte), self)?;
+        }
+
+        Ok(())
     }
 
     /// Get the value of an argument by its argument number. Can only be executed from inside a control method.

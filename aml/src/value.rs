@@ -176,6 +176,13 @@ pub enum AmlValue {
         offset: u64,
         length: u64,
     },
+    IndexField {
+        index_register: AmlHandle,
+        data_register: AmlHandle,
+        flags: FieldFlags,
+        offset: u64,
+        length: u64,
+    },
     Device,
     Method {
         flags: MethodFlags,
@@ -235,6 +242,7 @@ impl AmlValue {
             AmlValue::String(_) => AmlType::String,
             AmlValue::OpRegion { .. } => AmlType::OpRegion,
             AmlValue::Field { .. } => AmlType::FieldUnit,
+            AmlValue::IndexField { .. } => AmlType::FieldUnit,
             AmlValue::Device => AmlType::Device,
             AmlValue::Method { .. } => AmlType::Method,
             AmlValue::Buffer(_) => AmlType::Buffer,
@@ -266,7 +274,7 @@ impl AmlValue {
         match self {
             AmlValue::Boolean(value) => Ok(*value),
             AmlValue::Integer(value) => Ok(*value != 0),
-            AmlValue::Field { .. } => Ok(self.as_integer(context)? != 0),
+            AmlValue::Field { .. } | AmlValue::IndexField { .. } => Ok(self.as_integer(context)? != 0),
             _ => Err(AmlError::IncompatibleValueConversion { current: self.type_of(), target: AmlType::Integer }),
         }
     }
@@ -296,7 +304,7 @@ impl AmlValue {
              * Read from a field or buffer field. These can return either a `Buffer` or an `Integer`, so we make sure to call
              * `as_integer` on the result.
              */
-            AmlValue::Field { .. } => self.read_field(context)?.as_integer(context),
+            AmlValue::Field { .. } | AmlValue::IndexField { .. } => self.read_field(context)?.as_integer(context),
             AmlValue::BufferField { .. } => self.read_buffer_field(context)?.as_integer(context),
 
             _ => Err(AmlError::IncompatibleValueConversion { current: self.type_of(), target: AmlType::Integer }),
@@ -307,7 +315,7 @@ impl AmlValue {
         match self {
             AmlValue::Buffer(ref bytes) => Ok(bytes.clone()),
             // TODO: implement conversion of String and Integer to Buffer
-            AmlValue::Field { .. } => self.read_field(context)?.as_buffer(context),
+            AmlValue::Field { .. } | AmlValue::IndexField { .. } => self.read_field(context)?.as_buffer(context),
             AmlValue::BufferField { .. } => self.read_buffer_field(context)?.as_buffer(context),
             _ => Err(AmlError::IncompatibleValueConversion { current: self.type_of(), target: AmlType::Buffer }),
         }
@@ -317,7 +325,7 @@ impl AmlValue {
         match self {
             AmlValue::String(ref string) => Ok(string.clone()),
             // TODO: implement conversion of Buffer to String
-            AmlValue::Field { .. } => self.read_field(context)?.as_string(context),
+            AmlValue::Field { .. } | AmlValue::IndexField { .. } => self.read_field(context)?.as_string(context),
             _ => Err(AmlError::IncompatibleValueConversion { current: self.type_of(), target: AmlType::String }),
         }
     }
@@ -407,28 +415,46 @@ impl AmlValue {
     /// Reads from a field of an op-region, returning either a `AmlValue::Integer` or an `AmlValue::Buffer`,
     /// depending on the size of the field.
     pub fn read_field(&self, context: &mut AmlContext) -> Result<AmlValue, AmlError> {
-        if let AmlValue::Field { region, flags, offset, length } = self {
-            if let AmlValue::OpRegion(region) = context.namespace.get(*region)?.clone() {
-                region.read_field(*offset, *length, *flags, context)
-            } else {
-                Err(AmlError::FieldRegionIsNotOpRegion)
+        match self {
+            AmlValue::Field { region, flags, offset, length } => {
+                if let AmlValue::OpRegion(region) = context.namespace.get(*region)?.clone() {
+                    region.read_field(*offset, *length, *flags, context)
+                } else {
+                    Err(AmlError::FieldRegionIsNotOpRegion)
+                }
             }
-        } else {
-            Err(AmlError::IncompatibleValueConversion { current: self.type_of(), target: AmlType::FieldUnit })
+            AmlValue::IndexField { index_register, data_register, flags, offset, length } => {
+                let mut index = context.namespace.get(*index_register)?.clone();
+                let data = context.namespace.get(*data_register)?.clone();
+
+                context.read_indexed_field(&mut index, &data, *flags, *offset, *length)
+            }
+            _ => {
+                Err(AmlError::IncompatibleValueConversion { current: self.type_of(), target: AmlType::FieldUnit })
+            }
         }
     }
 
     /// Write to a field of an op-region, from either a `AmlValue::Integer` or `AmlValue::Buffer`
     /// as necessary.
     pub fn write_field(&mut self, value: AmlValue, context: &mut AmlContext) -> Result<(), AmlError> {
-        if let AmlValue::Field { region, flags, offset, length } = self {
-            if let AmlValue::OpRegion(region) = context.namespace.get(*region)?.clone() {
-                region.write_field(*offset, *length, *flags, value, context)
-            } else {
-                Err(AmlError::FieldRegionIsNotOpRegion)
+        match self {
+            AmlValue::Field { region, flags, offset, length } => {
+                if let AmlValue::OpRegion(region) = context.namespace.get(*region)?.clone() {
+                    region.write_field(*offset, *length, *flags, value, context)
+                } else {
+                    Err(AmlError::FieldRegionIsNotOpRegion)
+                }
             }
-        } else {
-            Err(AmlError::IncompatibleValueConversion { current: self.type_of(), target: AmlType::FieldUnit })
+            AmlValue::IndexField { index_register, data_register, flags, offset, length } => {
+                let mut index = context.namespace.get(*index_register)?.clone();
+                let mut data = context.namespace.get(*data_register)?.clone();
+
+                context.write_indexed_field(&mut index, &mut data, *flags, *offset, *length, value)
+            }
+            _ => {
+                Err(AmlError::IncompatibleValueConversion { current: self.type_of(), target: AmlType::FieldUnit })
+            }
         }
     }
 

@@ -812,7 +812,7 @@ where
                 AmlValue::Buffer(data) => {
                     AmlValue::Integer(try_with_context!(context, AmlValue::Buffer(data).as_integer(context)))
                 }
-                AmlValue::Field { .. } => {
+                AmlValue::Field { .. } | AmlValue::IndexField { .. } => {
                     AmlValue::Integer(try_with_context!(context, operand.as_integer(context)))
                 }
                 AmlValue::String(string) => AmlValue::Integer(try_with_context!(

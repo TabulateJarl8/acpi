@@ -88,7 +88,7 @@ where
     /*
      * NamedObj := DefBankField | DefCreateBitField | DefCreateByteField | DefCreateWordField | DefCreateDWordField |
      *             DefCreateQWordField | DefCreateField | DefDataRegion | DefExternal | DefOpRegion | DefPowerRes |
-     *             DefProcessor | DefThermalZone | DefMethod | DefMutex
+     *             DefProcessor | DefThermalZone | DefMethod | DefMutex | DefIndexField
      *
      * XXX: DefMethod and DefMutex (at least) are not included in any rule in the AML grammar,
      * but are defined in the NamedObj section so we assume they're part of NamedObj
@@ -111,7 +111,8 @@ where
             def_processor(),
             def_power_res(),
             def_thermal_zone(),
-            def_mutex()
+            def_mutex(),
+            def_index_field()
         ),
     )
 }
@@ -530,6 +531,55 @@ where
         .discard_result()
 }
 
+fn def_index_field<'a, 'c>() -> impl Parser<'a, 'c, ()>
+where
+    'c: 'a,
+{
+    /*
+     * DefIndexField := ExtOpPrefix 0x86 PkgLength NameString NameString FieldFlags FieldList
+     * FieldFlags := ByteData
+     */
+    let index_and_data_handles =
+        name_string().then(name_string()).map_with_context(|(index_name, data_name), context| {
+            let (_, index_handle) =
+                try_with_context!(context, context.namespace.search(&index_name, &context.current_scope));
+            let (_, data_handle) =
+                try_with_context!(context, context.namespace.search(&data_name, &context.current_scope));
+            (Ok((index_handle, data_handle)), context)
+        });
+
+    ext_opcode(opcode::EXT_DEF_INDEX_FIELD_OP)
+        .then(comment_scope(
+            DebugVerbosity::AllScopes,
+            "DefIndexField",
+            pkg_length().then(index_and_data_handles).then(take()).feed(
+                |((list_length, (index_handle, data_handle)), flags)| {
+                    move |mut input: &'a [u8], mut context: &'c mut AmlContext| -> ParseResult<'a, 'c, ()> {
+                        /*
+                         * FieldList := Nothing | <FieldElement FieldList>
+                         */
+                        let mut current_offset = 0;
+                        while list_length.still_parsing(input) {
+                            let (new_input, new_context, field_length) = field_element_index(
+                                index_handle,
+                                data_handle,
+                                FieldFlags::new(flags),
+                                current_offset,
+                            )
+                            .parse(input, context)?;
+                            input = new_input;
+                            context = new_context;
+                            current_offset += field_length;
+                        }
+
+                        Ok((input, context, ()))
+                    }
+                },
+            ),
+        ))
+        .discard_result()
+}
+
 /// Parses a `FieldElement`. Takes the current offset within the field list, and returns the length
 /// of the field element parsed.
 pub fn field_element<'a, 'c>(
@@ -595,6 +645,75 @@ where
 
             (Ok(length.raw_length as u64), context)
         });
+
+    choice!(reserved_field, named_field)
+}
+
+/// Parses a `FieldElement` for an IndexField. Similar to `field_element` but each field is
+/// accessed through an Index register and a Data register.
+pub fn field_element_index<'a, 'c>(
+    index_handle: AmlHandle,
+    data_handle: AmlHandle,
+    flags: FieldFlags,
+    current_offset: u64,
+) -> impl Parser<'a, 'c, u64>
+where
+    'c: 'a,
+{
+    /*
+     * FieldElement := NamedField | ReservedField | AccessField | ExtendedAccessField |
+     *                 ConnectField
+     * NamedField := NameSeg PkgLength
+     * ReservedField := 0x00 PkgLength
+     * AccessField := 0x01 AccessType AccessAttrib
+     * ConnectField := <0x02 NameString> | <0x02 BufferData>
+     * ExtendedAccessField := 0x03 AccessType ExtendedAccessAttrib AccessLength
+     *
+     * AccessType := ByteData
+     * AccessAttrib := ByteData
+     *
+     * XXX: The spec says a ConnectField can be <0x02 BufferData>, but BufferData isn't an AML
+     * object (it seems to be defined in ASL). We treat BufferData as if it was encoded like
+     * DefBuffer, and this seems to work so far.
+     */
+    // TODO: parse ConnectField and ExtendedAccessField
+
+    /*
+     * Reserved fields shouldn't actually be added to the namespace; they seem to show gaps in
+     * the operation region that aren't used for anything.
+     */
+    let reserved_field =
+        opcode(opcode::RESERVED_FIELD).then(pkg_length()).map(|((), length)| Ok(length.raw_length as u64));
+
+    // TODO: work out what to do with an access field
+    // let access_field = opcode(opcode::ACCESS_FIELD)
+    //     .then(take())
+    //     .then(take())
+    //     .map_with_context(|(((), access_type), access_attrib), context| (Ok(    , context));
+
+    // TODO: fields' start and end offsets need to be checked against their enclosing
+    //       OperationRegions to make sure they don't sit outside or cross the boundary.
+    //       This might not be a problem if a sane ASL compiler is used (which should check this
+    //       at compile-time), but it's better to be safe and validate that as well.
+
+    let named_field = name_seg().then(pkg_length()).map_with_context(move |(name_seg, length), context| {
+        try_with_context!(
+            context,
+            context.namespace.add_value_at_resolved_path(
+                AmlName::from_name_seg(name_seg),
+                &context.current_scope,
+                AmlValue::IndexField {
+                    index_register: index_handle,
+                    data_register: data_handle,
+                    flags,
+                    offset: current_offset,
+                    length: length.raw_length as u64,
+                },
+            )
+        );
+
+        (Ok(length.raw_length as u64), context)
+    });
 
     choice!(reserved_field, named_field)
 }

@@ -251,11 +251,7 @@ mod tests {
     fn test_name_seg() {
         let mut context = crate::test_utils::make_test_context();
 
-        check_ok!(
-            name_seg().parse(b"AF3Z", &mut context),
-            NameSeg([b'A', b'F', b'3', b'Z']),
-            &[]
-        );
+        check_ok!(name_seg().parse(b"AF3Z", &mut context), NameSeg([b'A', b'F', b'3', b'Z']), &[]);
         check_ok!(
             name_seg().parse(&[b'A', b'F', b'3', b'Z', 0xff], &mut context),
             NameSeg([b'A', b'F', b'3', b'Z']),
@@ -291,15 +287,7 @@ mod tests {
     fn test_prefix_path() {
         let mut context = crate::test_utils::make_test_context();
 
-        check_ok!(
-            name_string().parse(b"^ABCD", &mut context),
-            AmlName::from_str("^ABCD").unwrap(),
-            &[]
-        );
-        check_ok!(
-            name_string().parse(b"^^^ABCD", &mut context),
-            AmlName::from_str("^^^ABCD").unwrap(),
-            &[]
-        );
+        check_ok!(name_string().parse(b"^ABCD", &mut context), AmlName::from_str("^ABCD").unwrap(), &[]);
+        check_ok!(name_string().parse(b"^^^ABCD", &mut context), AmlName::from_str("^^^ABCD").unwrap(), &[]);
     }
 }
