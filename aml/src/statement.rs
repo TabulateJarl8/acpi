@@ -29,7 +29,8 @@ where
 {
     /*
      * StatementOpcode := DefBreak | DefBreakPoint | DefContinue | DefFatal | DefIfElse | DefLoad | DefNoop |
-     *                    DefNotify | DefRelease | DefReset | DefReturn | DefSignal | DefSleep | DefStall | DefWhile
+     *                    DefNotify | DefRelease | DefReset | DefReturn | DefSignal | DefSleep | DefStall | DefWhile |
+     *                    DefSignal | DefReset | DefWait
      */
     comment_scope(
         DebugVerbosity::AllScopes,
