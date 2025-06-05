@@ -749,6 +749,9 @@ pub enum AmlError {
     BufferFieldIndexesOutOfBounds,
     InvalidSizeOfApplication(AmlType),
 
+    /// Produced when the WaitOp event timeout is too long
+    Timeout,
+
     /// Unimplemented functionality - return error rather than abort
     Unimplemented,
 }

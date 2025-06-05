@@ -28,6 +28,7 @@ use crate::{
 };
 use alloc::{string::String, sync::Arc, vec::Vec};
 use core::str;
+use spinning_top::Spinlock;
 
 /// `TermList`s are usually found within explicit-length objects (so they have a `PkgLength`
 /// elsewhere in the structure), so this takes a number of bytes to parse.
@@ -88,7 +89,7 @@ where
     /*
      * NamedObj := DefBankField | DefCreateBitField | DefCreateByteField | DefCreateWordField | DefCreateDWordField |
      *             DefCreateQWordField | DefCreateField | DefDataRegion | DefExternal | DefOpRegion | DefPowerRes |
-     *             DefProcessor | DefThermalZone | DefMethod | DefMutex | DefIndexField
+     *             DefProcessor | DefThermalZone | DefMethod | DefMutex | DefIndexField | DefEvent
      *
      * XXX: DefMethod and DefMutex (at least) are not included in any rule in the AML grammar,
      * but are defined in the NamedObj section so we assume they're part of NamedObj
@@ -112,7 +113,8 @@ where
             def_power_res(),
             def_thermal_zone(),
             def_mutex(),
-            def_index_field()
+            def_index_field(),
+            def_event()
         ),
     )
 }
@@ -578,6 +580,28 @@ where
             ),
         ))
         .discard_result()
+}
+
+fn def_event<'a, 'c>() -> impl Parser<'a, 'c, ()>
+where
+    'c: 'a,
+{
+    /*
+     * DefEvent := ExtOpPrefix 0x02 NameString
+     */
+    ext_opcode(opcode::EXT_DEF_EVENT_OP)
+        .then(comment_scope(DebugVerbosity::AllScopes, "DefEvent", name_string()))
+        .map_with_context(|(_, name), context| {
+            try_with_context!(
+                context,
+                context.namespace.add_value_at_resolved_path(
+                    name,
+                    &context.current_scope,
+                    AmlValue::Event { signaled: Arc::new(Spinlock::new(false)) }
+                )
+            );
+            (Ok(()), context)
+        })
 }
 
 /// Parses a `FieldElement`. Takes the current offset within the field list, and returns the length

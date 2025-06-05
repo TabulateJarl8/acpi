@@ -1,4 +1,5 @@
 use crate::{
+    name_object::super_name,
     opcode::{self, ext_opcode, opcode},
     parser::{
         choice,
@@ -15,8 +16,10 @@ use crate::{
     },
     pkg_length::{pkg_length, PkgLength},
     term_object::{term_arg, term_list},
+    value::AmlType,
     AmlContext,
     AmlError,
+    AmlValue,
     DebugVerbosity,
 };
 
@@ -41,9 +44,102 @@ where
             def_return(),
             def_sleep(),
             def_stall(),
+            def_signal(),
+            def_reset(),
+            def_wait(),
             def_while()
         ),
     )
+}
+
+fn def_signal<'a, 'c>() -> impl Parser<'a, 'c, ()>
+where
+    'c: 'a,
+{
+    /*
+     * DefSignal := ExtOpPrefix 0x24 EventObject
+     * EventObject := SuperName
+     */
+    ext_opcode(opcode::EXT_SIGNAL_OP)
+        .then(comment_scope(DebugVerbosity::AllScopes, "DefSignal", super_name()))
+        .map_with_context(|(_, target), context| {
+            let value = try_with_context!(context, context.read_target(&target));
+            if let AmlValue::Event { signaled } = value {
+                *signaled.lock() = true;
+                (Ok(()), context)
+            } else {
+                (
+                    Err(Propagate::Err(AmlError::IncompatibleValueConversion {
+                        current: value.type_of(),
+                        target: AmlType::Event,
+                    })),
+                    context,
+                )
+            }
+        })
+}
+
+fn def_reset<'a, 'c>() -> impl Parser<'a, 'c, ()>
+where
+    'c: 'a,
+{
+    /*
+     * DefReset := ExtOpPrefix 0x26 EventObject
+     * EventObject := SuperName
+     */
+    ext_opcode(opcode::EXT_RESET_OP)
+        .then(comment_scope(DebugVerbosity::AllScopes, "DefReset", super_name()))
+        .map_with_context(|(_, target), context| {
+            let value = try_with_context!(context, context.read_target(&target));
+            if let AmlValue::Event { signaled } = value {
+                *signaled.lock() = false;
+                (Ok(()), context)
+            } else {
+                (
+                    Err(Propagate::Err(AmlError::IncompatibleValueConversion {
+                        current: value.type_of(),
+                        target: AmlType::Event,
+                    })),
+                    context,
+                )
+            }
+        })
+}
+
+fn def_wait<'a, 'c>() -> impl Parser<'a, 'c, ()>
+where
+    'c: 'a,
+{
+    /*
+     * DefWait := ExtOpPrefix 0x25 EventObject Operand
+     * EventObject := SuperName
+     */
+    ext_opcode(opcode::EXT_WAIT_OP)
+        .then(comment_scope(DebugVerbosity::AllScopes, "DefWait", super_name().then(term_arg())))
+        .map_with_context(|(_, (target, timeout_arg)), context| {
+            let timeout = try_with_context!(context, timeout_arg.as_integer(context));
+            let value = try_with_context!(context, context.read_target(&target));
+            if let AmlValue::Event { signaled } = value {
+                if *signaled.lock() {
+                    *signaled.lock() = false;
+                    (Ok(()), context)
+                } else if timeout == 0xFFFF_FFFF {
+                    // infinite wait should error out
+                    (Err(Propagate::Err(AmlError::Timeout)), context)
+                } else {
+                    // since this isnt concurrent, we cant really poll
+                    (Ok(()), context)
+                }
+            } else {
+                (
+                    Err(Propagate::Err(AmlError::IncompatibleValueConversion {
+                        current: value.type_of(),
+                        target: AmlType::Event,
+                    })),
+                    context,
+                )
+            }
+        })
 }
 
 fn def_break<'a, 'c>() -> impl Parser<'a, 'c, ()>

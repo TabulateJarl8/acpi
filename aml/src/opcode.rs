@@ -33,6 +33,7 @@ pub const DEF_CREATE_BYTE_FIELD_OP: u8 = 0x8c;
 pub const DEF_CREATE_BIT_FIELD_OP: u8 = 0x8d;
 pub const DEF_CREATE_QWORD_FIELD_OP: u8 = 0x8f;
 pub const EXT_DEF_MUTEX_OP: u8 = 0x01;
+pub const EXT_DEF_EVENT_OP: u8 = 0x02;
 pub const EXT_DEF_COND_REF_OF_OP: u8 = 0x12;
 pub const EXT_DEF_CREATE_FIELD_OP: u8 = 0x13;
 pub const EXT_REVISION_OP: u8 = 0x30;
@@ -58,6 +59,9 @@ pub const DEF_BREAK_OP: u8 = 0xa5;
 pub const DEF_BREAKPOINT_OP: u8 = 0xcc;
 pub const EXT_DEF_STALL_OP: u8 = 0x21;
 pub const EXT_DEF_SLEEP_OP: u8 = 0x22;
+pub const EXT_SIGNAL_OP: u8 = 0x24;
+pub const EXT_WAIT_OP: u8 = 0x25;
+pub const EXT_RESET_OP: u8 = 0x26;
 
 /*
  * Expression opcodes

@@ -204,6 +204,9 @@ pub enum AmlValue {
     Mutex {
         sync_level: u8,
     },
+    Event {
+        signaled: Arc<Spinlock<bool>>,
+    },
     // TODO: I think this will need to be `Arc`ed as well, as `Index` can be used on both Buffers and Packages
     Package(Vec<AmlValue>),
     PowerResource {
@@ -252,6 +255,7 @@ impl AmlValue {
             AmlValue::Package(_) => AmlType::Package,
             AmlValue::PowerResource { .. } => AmlType::PowerResource,
             AmlValue::ThermalZone => AmlType::ThermalZone,
+            AmlValue::Event { .. } => AmlType::Event,
         }
     }
 
