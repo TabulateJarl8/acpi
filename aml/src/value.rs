@@ -318,7 +318,16 @@ impl AmlValue {
     pub fn as_buffer(&self, context: &mut AmlContext) -> Result<Arc<Spinlock<Vec<u8>>>, AmlError> {
         match self {
             AmlValue::Buffer(ref bytes) => Ok(bytes.clone()),
-            // TODO: implement conversion of String and Integer to Buffer
+            AmlValue::String(ref s) => Ok(Arc::new(Spinlock::new(s.clone().into_bytes()))),
+            AmlValue::Integer(i) => {
+                let mut buf = Vec::new();
+                let mut value = *i;
+                while value > 0 {
+                    buf.push((value & 0xFF) as u8);
+                    value >>= 8;
+                }
+                Ok(Arc::new(Spinlock::new(buf)))
+            }
             AmlValue::Field { .. } | AmlValue::IndexField { .. } => self.read_field(context)?.as_buffer(context),
             AmlValue::BufferField { .. } => self.read_buffer_field(context)?.as_buffer(context),
             _ => Err(AmlError::IncompatibleValueConversion { current: self.type_of(), target: AmlType::Buffer }),
@@ -328,7 +337,23 @@ impl AmlValue {
     pub fn as_string(&self, context: &mut AmlContext) -> Result<String, AmlError> {
         match self {
             AmlValue::String(ref string) => Ok(string.clone()),
-            // TODO: implement conversion of Buffer to String
+            AmlValue::Buffer(ref buf) => {
+                let locked_buf = buf.lock();
+
+                // take up to the first NULL byte
+                let null_term_string = match locked_buf.iter().position(|&b| b == 0x0) {
+                    Some(pos) => &locked_buf[..pos],
+                    None => &locked_buf[..],
+                };
+
+                match core::str::from_utf8(null_term_string) {
+                    Ok(s) => Ok(s.to_string()),
+                    Err(_) => Err(AmlError::IncompatibleValueConversion {
+                        current: AmlType::Buffer,
+                        target: AmlType::String,
+                    }),
+                }
+            }
             AmlValue::Field { .. } | AmlValue::IndexField { .. } => self.read_field(context)?.as_string(context),
             _ => Err(AmlError::IncompatibleValueConversion { current: self.type_of(), target: AmlType::String }),
         }

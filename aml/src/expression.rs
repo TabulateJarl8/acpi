@@ -16,6 +16,7 @@ use alloc::{
     vec::Vec,
 };
 use core::{cmp::Ordering, mem, ops::Deref};
+use spinning_top::Spinlock;
 
 pub fn expression_opcode<'a, 'c>() -> impl Parser<'a, 'c, AmlValue>
 where
@@ -63,6 +64,7 @@ where
             def_to_integer(),
             def_cond_ref_of(),
             def_size_of(),
+            def_to_buffer(),
             method_invocation() // XXX: this must always appear last. See how we have to parse it to see why.
         ),
     )
@@ -839,6 +841,49 @@ where
             };
             try_with_context!(context, context.store(target, result.clone()));
             (Ok(result), context)
+        })
+}
+
+fn def_to_buffer<'a, 'c>() -> impl Parser<'a, 'c, AmlValue>
+where
+    'c: 'a,
+{
+    /*
+     * DefToBuffer := 0x96 Operand Target
+     * Operand := TermArg
+     */
+    opcode(opcode::DEF_TO_BUFFER_OP)
+        .then(comment_scope(DebugVerbosity::AllScopes, "DefToBuffer", term_arg().then(target())))
+        .map_with_context(|(_, (source, target)), context| {
+            let value = match source {
+                AmlValue::Buffer(buf) => AmlValue::Buffer(buf),
+                AmlValue::String(s) => {
+                    let bytes = Arc::new(Spinlock::new(s.into_bytes()));
+                    AmlValue::Buffer(bytes)
+                }
+                AmlValue::Integer(i) => {
+                    let mut buf = vec![];
+                    let mut value = i;
+                    while value > 0 {
+                        buf.push((value & 0xFF) as u8);
+                        value >>= 8;
+                    }
+                    let bytes = Arc::new(Spinlock::new(buf));
+                    AmlValue::Buffer(bytes)
+                }
+                _ => {
+                    return (
+                        Err(Propagate::Err(AmlError::IncompatibleValueConversion {
+                            current: source.type_of(),
+                            target: AmlType::Buffer,
+                        })),
+                        context,
+                    );
+                }
+            };
+
+            try_with_context!(context, context.store(target, value.clone()));
+            (Ok(value), context)
         })
 }
 
