@@ -396,6 +396,7 @@ pub struct FieldUnit {
     pub flags: FieldFlags,
     pub bit_index: usize,
     pub bit_length: usize,
+    pub access_attrib: Option<AccessAttrib>,
 }
 
 #[derive(Clone, Debug)]
@@ -403,6 +404,56 @@ pub enum FieldUnitKind {
     Normal { region: WrappedObject },
     Bank { region: WrappedObject, bank: WrappedObject, bank_value: u64 },
     Index { index: WrappedObject, data: WrappedObject },
+}
+
+#[derive(Copy, Clone, Debug)]
+pub enum AccessAttrib {
+    Quick,
+    SendReceive,
+    Byte,
+    Word,
+    Block,
+    ProcessCall,
+    BlockProcessCall,
+    Bytes(u8),
+    RawBytes(u8),
+    RawProcessBytes(u8),
+}
+
+impl AccessAttrib {
+    pub fn from_access_field(access_type: u8, attrib_byte: u8) -> Result<Self, AmlError> {
+        // see 20.2.5.2
+        match access_type.get_bits(6..8) {
+            0 => match attrib_byte {
+                0x02 => Ok(Self::Quick),
+                0x04 => Ok(Self::SendReceive),
+                0x06 => Ok(Self::Byte),
+                0x08 => Ok(Self::Word),
+                0x0A => Ok(Self::Block),
+                0x0C => Ok(Self::ProcessCall),
+                0x0D => Ok(Self::BlockProcessCall),
+                _ => Err(AmlError::InvalidAccessAttrib),
+            },
+            1 => Ok(AccessAttrib::Bytes(attrib_byte)),
+            2 => Ok(AccessAttrib::RawBytes(attrib_byte)),
+            3 => Ok(AccessAttrib::RawProcessBytes(attrib_byte)),
+            // anything else is out of range of 2 bits
+            _ => unreachable!(),
+        }
+    }
+
+    pub fn from_extended_access_field(
+        access_type: u8,
+        extended_access_attrib: u8,
+        access_length: u8,
+    ) -> Result<Self, AmlError> {
+        match (access_type.get_bits(6..8), extended_access_attrib) {
+            (1, 0x0B) => Ok(AccessAttrib::Bytes(access_length)),
+            (2, 0x0E) => Ok(AccessAttrib::RawBytes(access_length)),
+            (3, 0x0F) => Ok(AccessAttrib::RawProcessBytes(access_length)),
+            _ => Err(AmlError::InvalidAccessAttrib),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]

@@ -28,12 +28,12 @@ use crate::{
     Handle,
     Handler,
     PhysicalMapping,
+    aml::object::{AccessAttrib, FieldAccessType},
     platform::AcpiPlatform,
     registers::{FixedRegisters, Pm1ControlBit},
     sdt::{SdtHeader, facs::Facs, fadt::Fadt},
 };
 use alloc::{
-    boxed::Box,
     collections::btree_map::BTreeMap,
     string::{String, ToString},
     sync::Arc,
@@ -110,7 +110,7 @@ where
     pub namespace: Spinlock<Namespace>,
     pub object_token: Spinlock<ObjectToken>,
     integer_size: IntegerSize,
-    region_handlers: Spinlock<BTreeMap<RegionSpace, Box<R>>>,
+    region_handlers: Spinlock<BTreeMap<RegionSpace, Arc<R>>>,
 
     global_lock_mutex: Handle,
 
@@ -262,7 +262,7 @@ where
         }
     }
 
-    pub fn install_region_handler(&self, space: RegionSpace, handler: Box<R>) {
+    pub fn install_region_handler(&self, space: RegionSpace, handler: Arc<R>) {
         let mut handlers = self.region_handlers.lock();
         assert!(handlers.get(&space).is_none(), "Tried to install handler for same space twice!");
         handlers.insert(space, handler);
@@ -1838,6 +1838,7 @@ where
         const EXTENDED_ACCESS_FIELD: u8 = 0x03;
 
         let mut field_offset = 0;
+        let mut access_attrib: Option<AccessAttrib> = None;
 
         while context.current_block.pc < (start_pc + pkg_length) {
             match context.next()? {
@@ -1852,15 +1853,20 @@ where
                      * the list.
                      */
                     let access_type = context.next()?;
-                    let _access_attrib = context.next()?;
+                    let attrib_byte = context.next()?;
                     flags.set_bits(0..4, access_type);
+                    access_attrib = Some(AccessAttrib::from_access_field(access_type, attrib_byte)?);
                 }
                 EXTENDED_ACCESS_FIELD => {
                     let access_type = context.next()?;
-                    let _extended_access_attrib = context.next()?;
-                    let _access_length = context.next()?;
+                    let extended_access_attrib = context.next()?;
+                    let access_length = context.next()?;
                     flags.set_bits(0..4, access_type);
-                    warn!("Ignoring extended attributes and length in ExtendedAccessField");
+                    access_attrib = Some(AccessAttrib::from_extended_access_field(
+                        access_type,
+                        extended_access_attrib,
+                        access_length,
+                    )?);
                 }
                 CONNECT_FIELD => {
                     // TODO: either consume a namestring or `BufferData` (it's not
@@ -1878,6 +1884,7 @@ where
                         bit_index: field_offset,
                         bit_length: field_length,
                         flags: FieldFlags(flags),
+                        access_attrib,
                     });
                     self.namespace.lock().insert(field_name.resolve(&context.current_scope)?, field.wrap())?;
 
@@ -2586,6 +2593,13 @@ where
                 }
             };
 
+            // if field access type is buffer - read everything into one buffer and early return
+            if let FieldAccessType::Buffer = field.flags.access_type()? {
+                let raw_buf =
+                    self.do_native_region_buffer_read(read_region, aligned_offset / 8, field.access_attrib)?;
+                return Ok(Object::Buffer(raw_buf).wrap());
+            }
+
             let raw = self.do_native_region_read(read_region, aligned_offset / 8, access_width_bits / 8)?;
             let src_index = if i == 0 { field.bit_index % access_width_bits } else { 0 };
             let remaining_length = field.bit_length - read_so_far;
@@ -2665,6 +2679,18 @@ where
                     data.bit_index
                 }
             };
+
+            // if field access type is buffer - write the while buffer and early return
+            if let FieldAccessType::Buffer = field.flags.access_type()? {
+                self.do_native_region_buffer_write(
+                    write_region,
+                    aligned_offset / 8,
+                    field.access_attrib,
+                    value_bytes,
+                )?;
+                return Ok(());
+            }
+
             let dst_index = if i == 0 { field.bit_index % access_width_bits } else { 0 };
 
             /*
@@ -2704,11 +2730,12 @@ where
         Ok(())
     }
 
-    /// Performs an actual read from an operation region. `offset` and `length` must respect the
-    /// access requirements of the field being read, and are supplied in **bytes**. This may call
-    /// AML methods if required, and may invoke user-supplied handlers.
+    /// Performs an actual scalar read from an operation region. `offset` and `length` must respect
+    /// the access requirements of the field being read, and are supplied in **bytes**. This may
+    /// call AML methods if required, and may invoke user-supplied handlers. Buffer reads are done
+    /// in a separate function.
     fn do_native_region_read(&self, region: &OpRegion, offset: usize, length: usize) -> Result<u64, AmlError> {
-        trace!("Native field read. Region = {:?}, offset = {:#x}, length={:#x}", region, offset, length);
+        trace!("Native field scalar read. Region = {:?}, offset = {:#x}, length={:#x}", region, offset, length);
 
         match region.space {
             RegionSpace::SystemMemory => Ok({
@@ -2741,28 +2768,74 @@ where
                 }
             }
 
+            // see table 19.34
             RegionSpace::EmbeddedControl
-            | RegionSpace::SmBus
             | RegionSpace::SystemCmos
             | RegionSpace::PciBarTarget
-            | RegionSpace::Ipmi
             | RegionSpace::GeneralPurposeIo
-            | RegionSpace::GenericSerialBus
             | RegionSpace::Pcc
             | RegionSpace::Oem(_) => {
-                if let Some(_handler) = self.region_handlers.lock().get(&region.space) {
-                    warn!("Custom region handlers aren't actually supported yet.");
-                    Err(AmlError::LibUnimplemented)
-                } else {
-                    Err(AmlError::NoHandlerForRegionAccess(region.space))
+                let handler = self.region_handlers.lock().get(&region.space).cloned();
+                let Some(handler) = handler else {
+                    return Err(AmlError::NoHandlerForRegionAccess(region.space));
+                };
+
+                match length {
+                    1 => handler.read_u8(region, offset).map(|v| v as u64),
+                    2 => handler.read_u16(region, offset).map(|v| v as u64),
+                    4 => handler.read_u32(region, offset).map(|v| v as u64),
+                    8 => handler.read_u64(region, offset),
+                    _ => panic!(),
                 }
+            }
+            RegionSpace::SmBus | RegionSpace::GenericSerialBus | RegionSpace::Ipmi => {
+                warn!("Non-BufferAcc reads are not permitted on region space {:?}", region.space);
+                Err(AmlError::InvalidRegionAccess)
             }
         }
     }
 
-    /// Performs an actual write to an operation region. `offset` and `length` must respect the
-    /// access requirements of the field being read, and are supplied in **bytes**. This may call
-    /// AML methods if required, and may invoke user-supplied handlers.
+    /// Performs an actual buffer read from an operation region. This is used for fields with a
+    /// `BufferAcc` access type, such as the SMBus, GenericSerialBus, or IPMI. The transaction
+    /// protocol is defined by the `AccessAttrib` on the field. `offset` is supplied in **bytes**.
+    /// This may call AML methods if required, and may invoke user-supplied handlers.
+    fn do_native_region_buffer_read(
+        &self,
+        region: &OpRegion,
+        offset: usize,
+        access_attrib: Option<AccessAttrib>,
+    ) -> Result<Vec<u8>, AmlError> {
+        trace!(
+            "Native field buffer read. Region = {:?}, offset = {:#x}, access_attrib={:?}",
+            region, offset, access_attrib
+        );
+
+        match region.space {
+            RegionSpace::SmBus | RegionSpace::GenericSerialBus | RegionSpace::Ipmi | RegionSpace::Oem(_) => {
+                let handler = self.region_handlers.lock().get(&region.space).cloned();
+                let Some(handler) = handler else {
+                    return Err(AmlError::NoHandlerForRegionAccess(region.space));
+                };
+
+                handler.read_buffer(region, offset, access_attrib)
+            }
+            RegionSpace::SystemMemory
+            | RegionSpace::SystemIO
+            | RegionSpace::PciConfig
+            | RegionSpace::EmbeddedControl
+            | RegionSpace::SystemCmos
+            | RegionSpace::PciBarTarget
+            | RegionSpace::GeneralPurposeIo
+            | RegionSpace::Pcc => {
+                warn!("BufferAcc reads are not permitted on region space {:?}", region.space);
+                Err(AmlError::InvalidRegionAccess)
+            }
+        }
+    }
+
+    /// Performs an actual scalar write to an operation region. `offset` and `length` must respect
+    /// the access requirements of the field being read, and are supplied in **bytes**. This may
+    /// call AML methods if required, and may invoke user-supplied handlers.
     fn do_native_region_write(
         &self,
         region: &OpRegion,
@@ -2771,7 +2844,7 @@ where
         value: u64,
     ) -> Result<(), AmlError> {
         trace!(
-            "Native field write. Region = {:?}, offset = {:#x}, length={:#x}, value={:#x}",
+            "Native field scalar write. Region = {:?}, offset = {:#x}, length={:#x}, value={:#x}",
             region, offset, length, value
         );
 
@@ -2810,20 +2883,66 @@ where
             }
 
             RegionSpace::EmbeddedControl
-            | RegionSpace::SmBus
             | RegionSpace::SystemCmos
             | RegionSpace::PciBarTarget
-            | RegionSpace::Ipmi
             | RegionSpace::GeneralPurposeIo
-            | RegionSpace::GenericSerialBus
             | RegionSpace::Pcc
             | RegionSpace::Oem(_) => {
-                if let Some(_handler) = self.region_handlers.lock().get(&region.space) {
-                    warn!("Custom region handlers aren't actually supported yet.");
-                    Err(AmlError::LibUnimplemented)
-                } else {
-                    Err(AmlError::NoHandlerForRegionAccess(region.space))
+                let handler = self.region_handlers.lock().get(&region.space).cloned();
+                let Some(handler) = handler else {
+                    return Err(AmlError::NoHandlerForRegionAccess(region.space));
+                };
+
+                match length {
+                    1 => handler.write_u8(region, offset, value as u8),
+                    2 => handler.write_u16(region, offset, value as u16),
+                    4 => handler.write_u32(region, offset, value as u32),
+                    8 => handler.write_u64(region, offset, value),
+                    _ => panic!(),
                 }
+            }
+            RegionSpace::SmBus | RegionSpace::GenericSerialBus | RegionSpace::Ipmi => {
+                warn!("Non-BufferAcc writes are not permitted on region space {:?}", region.space);
+                Err(AmlError::InvalidRegionAccess)
+            }
+        }
+    }
+
+    /// Performs an actual buffer write to an operation region. This is used for fields with a
+    /// `BufferAcc` access type, such as the SMBus, GenericSerialBus, or IPMI. The transaction
+    /// protocol is defined by the `AccessAttrib` on the field. `offset` is supplied in
+    /// **bytes**. This may call AML methods if required, and may invoke user-supplied handlers.
+    fn do_native_region_buffer_write(
+        &self,
+        region: &OpRegion,
+        offset: usize,
+        access_attrib: Option<AccessAttrib>,
+        value: &[u8],
+    ) -> Result<(), AmlError> {
+        trace!(
+            "Native field buffer write. Region = {:?}, offset = {:#x}, access_attrib={:?}, value={:?}",
+            region, offset, access_attrib, value
+        );
+
+        match region.space {
+            RegionSpace::SmBus | RegionSpace::GenericSerialBus | RegionSpace::Ipmi | RegionSpace::Oem(_) => {
+                let handler = self.region_handlers.lock().get(&region.space).cloned();
+                let Some(handler) = handler else {
+                    return Err(AmlError::NoHandlerForRegionAccess(region.space));
+                };
+
+                handler.write_buffer(region, offset, access_attrib, value)
+            }
+            RegionSpace::SystemMemory
+            | RegionSpace::SystemIO
+            | RegionSpace::PciConfig
+            | RegionSpace::EmbeddedControl
+            | RegionSpace::SystemCmos
+            | RegionSpace::PciBarTarget
+            | RegionSpace::GeneralPurposeIo
+            | RegionSpace::Pcc => {
+                warn!("BufferAcc writes are not permitted on region space {:?}", region.space);
+                Err(AmlError::InvalidRegionAccess)
             }
         }
     }
@@ -3023,11 +3142,8 @@ impl MethodContext {
             if args.len() != flags.arg_count() {
                 return Err(AmlError::MethodArgCountIncorrect);
             }
-            let block = Block {
-                stream: code.clone(),
-                pc: 0,
-                kind: BlockKind::Method { method_scope: scope.clone() },
-            };
+            let block =
+                Block { stream: code.clone(), pc: 0, kind: BlockKind::Method { method_scope: scope.clone() } };
             let args = core::array::from_fn(|i| {
                 if let Some(arg) = args.get(i) { arg.clone() } else { Object::Uninitialized.wrap() }
             });
@@ -3529,6 +3645,9 @@ pub enum AmlError {
 
     InvalidResourceDescriptor,
     UnexpectedResourceType,
+
+    InvalidAccessAttrib,
+    InvalidRegionAccess,
 
     NoHandlerForRegionAccess(RegionSpace),
     MutexAcquireTimeout,

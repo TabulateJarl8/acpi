@@ -1,4 +1,6 @@
-use crate::aml::{AmlError, namespace::AmlName};
+use alloc::vec::Vec;
+
+use crate::aml::{AmlError, namespace::AmlName, object::AccessAttrib};
 
 #[derive(Clone, Debug)]
 pub struct OpRegion {
@@ -9,15 +11,31 @@ pub struct OpRegion {
 }
 
 pub trait RegionHandler {
-    fn read_u8(&self, region: &OpRegion) -> Result<u8, AmlError>;
-    fn read_u16(&self, region: &OpRegion) -> Result<u16, AmlError>;
-    fn read_u32(&self, region: &OpRegion) -> Result<u32, AmlError>;
-    fn read_u64(&self, region: &OpRegion) -> Result<u64, AmlError>;
+    fn read_u8(&self, region: &OpRegion, offset: usize) -> Result<u8, AmlError>;
+    fn read_u16(&self, region: &OpRegion, offset: usize) -> Result<u16, AmlError>;
+    fn read_u32(&self, region: &OpRegion, offset: usize) -> Result<u32, AmlError>;
+    fn read_u64(&self, region: &OpRegion, offset: usize) -> Result<u64, AmlError>;
 
-    fn write_u8(&self, region: &OpRegion, value: u8) -> Result<(), AmlError>;
-    fn write_u16(&self, region: &OpRegion, value: u16) -> Result<(), AmlError>;
-    fn write_u32(&self, region: &OpRegion, value: u32) -> Result<(), AmlError>;
-    fn write_u64(&self, region: &OpRegion, value: u64) -> Result<(), AmlError>;
+    fn write_u8(&self, region: &OpRegion, offset: usize, value: u8) -> Result<(), AmlError>;
+    fn write_u16(&self, region: &OpRegion, offset: usize, value: u16) -> Result<(), AmlError>;
+    fn write_u32(&self, region: &OpRegion, offset: usize, value: u32) -> Result<(), AmlError>;
+    fn write_u64(&self, region: &OpRegion, offset: usize, value: u64) -> Result<(), AmlError>;
+
+    // TODO: the different BufferAcc methods have actual typed buffers; e.g. GenericSerialBus data buffer (5.5.2.4.7.2)
+    fn read_buffer(
+        &self,
+        region: &OpRegion,
+        offset: usize,
+        attrib: Option<AccessAttrib>,
+    ) -> Result<Vec<u8>, AmlError>;
+
+    fn write_buffer(
+        &self,
+        region: &OpRegion,
+        offset: usize,
+        attrib: Option<AccessAttrib>,
+        value: &[u8],
+    ) -> Result<(), AmlError>;
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
